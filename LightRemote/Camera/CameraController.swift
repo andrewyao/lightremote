@@ -34,7 +34,12 @@ final class CameraController {
         return SonyClient.cameraBase
     }
 
-    init() { api = CameraAPI(client: SonyClient(baseURL: Self.configuredBase)) }
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+        api = CameraAPI(client: SonyClient(baseURL: Self.configuredBase, session: session))
+    }
 
     func can(_ method: String) -> Bool { state.availableApis?.contains(method) ?? false }
 
@@ -43,7 +48,7 @@ final class CameraController {
     func connect() async {
         guard connection != .connecting else { return }
         disconnect()
-        api = CameraAPI(client: SonyClient(baseURL: Self.configuredBase))
+        api = CameraAPI(client: SonyClient(baseURL: Self.configuredBase, session: session))
         connection = .connecting
         do {
             let apis = try await api.availableApis(timeout: 3)   // fails fast when not on the camera's Wi-Fi
@@ -95,9 +100,12 @@ final class CameraController {
                     self?.merge(event)
                 } catch let e as SonyError where e.code == SonyError.alreadyPolling {
                     try? await Task.sleep(for: .milliseconds(300))
+                } catch is SonyError {
+                    failures = 0
+                    try? await Task.sleep(for: .seconds(1))
                 } catch {
                     if Task.isCancelled { return }
-                    failures += 1
+                    if await self?.cameraAnswers(api) == true { failures = 0 } else { failures += 1 }
                     if failures >= 3 {
                         self?.connection = .failed("Lost connection to the camera")
                         self?.liveTask?.cancel()
@@ -110,8 +118,20 @@ final class CameraController {
         }
     }
 
+    /// A long-poll can time out on a camera that simply has nothing to report, so ask it directly.
+    private func cameraAnswers(_ api: CameraAPI) async -> Bool {
+        do {
+            merge(try await api.event(longPoll: false))
+            return true
+        } catch is SonyError {
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func startLiveView() {
-        guard can("startLiveview") else { return }
+        guard connection == .connected, liveTask == nil, can("startLiveview") else { return }
         liveTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let api = self?.api else { return }
@@ -128,7 +148,10 @@ final class CameraController {
     }
 
     func merge(_ e: CameraEvent) {
-        if let v = e.availableApis { state.availableApis = v }
+        if let v = e.availableApis {
+            state.availableApis = v
+            startLiveView()   // the camera may only offer it some time after startRecMode
+        }
         if let v = e.cameraStatus { state.cameraStatus = v }
         if let v = e.shootMode { state.shootMode = v }
         if let v = e.exposureMode { state.exposureMode = v }

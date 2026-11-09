@@ -104,7 +104,12 @@ def main():
                                                  "(positive = camera was fast)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-backup", action="store_true", help="don't keep *_original copies")
-    args = ap.parse_args()
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv[:-1]):
+        if arg == "--shift":  # older argparse reads a value like -1h as an option unless it's attached
+            argv[i:i + 2] = [f"--shift={argv[i + 1]}"]
+            break
+    args = ap.parse_args(argv)
 
     if not shutil.which("exiftool"):
         sys.exit("exiftool not found. Install it with: brew install exiftool")

@@ -38,8 +38,12 @@ actor SonyClient {
         let body: JSON = ["method": .string(method), "params": .array(params), "id": .number(Double(id)),
                           "version": .string(version)]
         request.httpBody = try JSONEncoder().encode(body)
-        let (data, _) = try await session.data(for: request)
-        return try Self.parseResponse(data)
+        do {
+            let (data, _) = try await session.data(for: request)
+            return try Self.parseResponse(data)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()   // URLSession's spelling of task cancellation
+        }
     }
 
     static func parseResponse(_ data: Data) throws -> [JSON] {

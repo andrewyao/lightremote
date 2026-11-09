@@ -22,9 +22,11 @@ final class AppModel {
             guard let self, UserDefaults.standard.object(forKey: "autoTrack") as? Bool ?? true else { return }
             if !self.track.isRecording { self.track.start(); self.preciseFromCamera = true }
         }
-        // Save battery: back to low-power tracking once the camera is gone.
         camera.onDisconnected = { [weak self] in
-            guard let self, self.preciseFromCamera, !self.runner.isRunning else { return }
+            guard let self else { return }
+            self.runner.stop()   // the connect screen has no Stop button, so a job can't outlive the connection
+            // Save battery: back to low-power tracking once the camera is gone.
+            guard self.preciseFromCamera else { return }
             self.preciseFromCamera = false
             self.track.stop()
         }
@@ -36,12 +38,12 @@ final class AppModel {
     }
 
     private func handle(_ result: ShotResult) {
-        track.noteShot(at: result.takenAt)
-        let settings = camera.state
         let point = track.location(at: result.takenAt)
+        let ingestion = gallery.ingest(result.urls, takenAt: result.takenAt, settings: camera.state, location: point)
+        if ingestion.isNewShot { track.noteShot(at: result.takenAt) }
+        guard result.clockReliable else { return }
         Task {
-            let ingested = await gallery.ingest(result.urls, takenAt: result.takenAt, settings: settings, location: point)
-            guard result.clockReliable, let wall = ingested.first?.cameraWallClock else { return }
+            guard let wall = await ingestion.results.value.first?.cameraWallClock else { return }
             let seconds = Int(wall.timeIntervalSince(result.takenAt).rounded())
             track.noteClockOffset(cameraMinusUTC: seconds, at: result.takenAt)
         }

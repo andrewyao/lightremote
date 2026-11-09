@@ -23,6 +23,7 @@ final class PostviewStore {
     var lastError: String?
     private let folder: URL
     private var thumbnails: [UUID: UIImage] = [:]
+    private var downloads: [String: Task<Ingested?, Never>] = [:]
 
     init(folder: URL? = nil) {
         self.folder = folder ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -37,30 +38,54 @@ final class PostviewStore {
 
     func fileURL(_ shot: Shot) -> URL { folder.appendingPathComponent(shot.fileName) }
 
-    struct Ingested { var shot: Shot; var cameraWallClock: Date? }
+    struct Ingested: Sendable { var shot: Shot; var cameraWallClock: Date? }
 
-    /// Downloads new postviews. URLs already in the gallery are ignored (they arrive from both
-    /// actTakePicture and getEvent).
-    func ingest(_ urls: [URL], takenAt: Date, settings: CameraEvent, location: TrackPoint?) async -> [Ingested] {
-        var result: [Ingested] = []
-        for url in urls where !shots.contains(where: { $0.sourceURL == url.absoluteString }) {
-            do {
-                var request = URLRequest(url: url, timeoutInterval: 20)
-                request.cachePolicy = .reloadIgnoringLocalCacheData
-                let (data, _) = try await URLSession.shared.data(for: request)
-                let name = "\(Int(takenAt.timeIntervalSince1970 * 1000))-\(url.lastPathComponent)"
-                try data.write(to: folder.appendingPathComponent(name), options: .atomic)
-                let shot = Shot(takenAt: takenAt, fileName: name, sourceURL: url.absoluteString,
-                                fNumber: settings.fNumber?.current, shutterSpeed: settings.shutterSpeed?.current,
-                                iso: settings.iso?.current, latitude: location?.latitude, longitude: location?.longitude)
-                shots.insert(shot, at: 0)
-                result.append(Ingested(shot: shot, cameraWallClock: GeoTagger.cameraWallClock(of: data)))
-            } catch {
-                lastError = "Couldn't download preview: \(error.localizedDescription)"
-            }
+    struct Ingestion {
+        /// False when every URL was already reported, so this isn't another shot.
+        var isNewShot: Bool
+        var results: Task<[Ingested], Never>
+    }
+
+    /// actTakePicture and getEvent report the same postview almost simultaneously, in either order. Claims each URL
+    /// before returning, so the first report starts the download and later ones share its result.
+    func ingest(_ urls: [URL], takenAt: Date, settings: CameraEvent, location: TrackPoint?) -> Ingestion {
+        var isNewShot = urls.isEmpty
+        let tasks = urls.compactMap { url -> Task<Ingested?, Never>? in
+            let key = url.absoluteString
+            if let existing = downloads[key] { return existing }
+            if shots.contains(where: { $0.sourceURL == key }) { return nil }
+            isNewShot = true
+            let task = Task { await download(url, takenAt: takenAt, settings: settings, location: location) }
+            downloads[key] = task
+            return task
         }
-        saveIndex()
-        return result
+        return Ingestion(isNewShot: isNewShot, results: Task {
+            var results: [Ingested] = []
+            for task in tasks {
+                if let ingested = await task.value { results.append(ingested) }
+            }
+            return results
+        })
+    }
+
+    private func download(_ url: URL, takenAt: Date, settings: CameraEvent, location: TrackPoint?) async -> Ingested? {
+        do {
+            var request = URLRequest(url: url, timeoutInterval: 20)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let name = "\(Int(takenAt.timeIntervalSince1970 * 1000))-\(url.lastPathComponent)"
+            try data.write(to: folder.appendingPathComponent(name), options: .atomic)
+            let shot = Shot(takenAt: takenAt, fileName: name, sourceURL: url.absoluteString,
+                            fNumber: settings.fNumber?.current, shutterSpeed: settings.shutterSpeed?.current,
+                            iso: settings.iso?.current, latitude: location?.latitude, longitude: location?.longitude)
+            shots.insert(shot, at: 0)
+            saveIndex()
+            return Ingested(shot: shot, cameraWallClock: GeoTagger.cameraWallClock(of: data))
+        } catch {
+            downloads[url.absoluteString] = nil
+            lastError = "Couldn't download preview: \(error.localizedDescription)"
+            return nil
+        }
     }
 
     func thumbnail(_ shot: Shot) -> UIImage? {

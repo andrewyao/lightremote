@@ -72,6 +72,9 @@ final class JobRunner {
     private var task: Task<Void, Never>?
     private var stopRequested = false
     private let ticker: any Ticker
+    /// EXIF records when the shutter opened and the shot is timed at the midpoint of the camera call, so a call
+    /// this short keeps the error within a second. Long exposures take longer than this.
+    private static let maxClockSyncRoundTrip: Duration = .seconds(2)
 
     init(ticker: any Ticker = SystemTicker()) { self.ticker = ticker }
 
@@ -103,12 +106,13 @@ final class JobRunner {
     func wait() async { await task?.value }
 
     private func shoot(_ shooter: any Shooter, clockReliable: Bool) async throws {
+        let started = ticker.now
         let before = Date()
         let urls = try await shooter.takePicture()
         let after = Date()
         progress?.shotsTaken += 1
         onShot?(ShotResult(urls: urls, takenAt: before.addingTimeInterval(after.timeIntervalSince(before) / 2),
-                           clockReliable: clockReliable))
+                           clockReliable: clockReliable && ticker.now - started <= Self.maxClockSyncRoundTrip))
     }
 
     private func run(_ job: ShootingJob, _ shooter: any Shooter) async throws {

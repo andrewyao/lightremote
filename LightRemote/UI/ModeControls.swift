@@ -55,6 +55,7 @@ struct ModeStrip: View {
     @Environment(AppModel.self) private var model
     @Binding var mode: ShootMode
     var vertical = false
+    @AppStorage("shutterBeforeBulb") private var shutterBeforeBulb = ""
 
     private var camera: CameraController { model.camera }
 
@@ -93,20 +94,50 @@ struct ModeStrip: View {
         }
         .disabled(model.runner.isRunning)
         .sensoryFeedback(.selection, trigger: mode)
+        .onChange(of: available.contains(mode), initial: true) { _, isAvailable in
+            if isAvailable { apply(mode) }   // a mode restored from last launch still needs the camera set up
+        }
     }
 
     /// Selecting a mode also puts the camera in the state that mode needs, so there's no second step.
     private func select(_ m: ShootMode) {
         mode = m
-        let wantsMovie = m == .movie
-        let isMovie = camera.state.shootMode?.current == "movie"
-        if wantsMovie != isMovie {
-            camera.perform { try await $0.setShootMode(wantsMovie ? "movie" : "still") }
+        apply(m)
+    }
+
+    private func apply(_ m: ShootMode) {
+        let change = m.change(from: camera.state, shutterBeforeBulb: shutterBeforeBulb.isEmpty ? nil : shutterBeforeBulb)
+        shutterBeforeBulb = change.shutterBeforeBulb ?? ""
+        if let v = change.shootMode { camera.perform { try await $0.setShootMode(v) } }
+        if let v = change.shutterSpeed { camera.perform { try await $0.setShutterSpeed(v) } }
+    }
+}
+
+/// What the camera has to change for a mode to work.
+struct ModeChange: Equatable {
+    var shootMode: String?
+    var shutterSpeed: String?
+    /// The shutter speed to go back to on leaving Bulb, remembered across launches.
+    var shutterBeforeBulb: String?
+}
+
+extension ShootMode {
+    func change(from state: CameraEvent, shutterBeforeBulb saved: String?) -> ModeChange {
+        var change = ModeChange(shutterBeforeBulb: saved)
+        if (self == .movie) != (state.shootMode?.current == "movie") {
+            change.shootMode = self == .movie ? "movie" : "still"
         }
-        if m == .bulb, camera.state.shutterSpeed?.current != "BULB",
-           camera.state.shutterSpeed?.candidates.contains("BULB") == true {
-            camera.perform { try await $0.setShutterSpeed("BULB") }
+        guard let shutter = state.shutterSpeed else { return change }
+        if self == .bulb {
+            if shutter.current != "BULB", shutter.candidates.contains("BULB") {
+                change.shutterSpeed = "BULB"
+                change.shutterBeforeBulb = shutter.current
+            }
+        } else if shutter.current == "BULB", let saved, shutter.candidates.contains(saved) {
+            change.shutterSpeed = saved
+            change.shutterBeforeBulb = nil
         }
+        return change
     }
 }
 

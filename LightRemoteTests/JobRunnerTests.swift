@@ -50,6 +50,8 @@ final class FakeShooter: Shooter, @unchecked Sendable {
     func stopMovie() async throws { log("movie stop") }
 }
 
+private struct UncheckedReply: @unchecked Sendable { let value: StubCamera.Reply }
+
 @MainActor
 final class JobRunnerTests: XCTestCase {
     func testIntervalShootsOnFixedScheduleWithoutDrift() async {
@@ -116,6 +118,42 @@ final class JobRunnerTests: XCTestCase {
         runner.stop()
         await runner.wait()
         XCTAssertEqual(shooter.calls, ["movie start", "movie stop"])
+    }
+
+    func testLongExposureIsNotUsedForClockSync() async {
+        let ticker = FakeTicker()
+        let shooter = FakeShooter()
+        shooter.ticker = ticker
+        shooter.shotDuration = .seconds(30)
+        let runner = JobRunner(ticker: ticker)
+        var results: [ShotResult] = []
+        runner.onShot = { results.append($0) }
+        runner.start(.single, on: shooter)
+        await runner.wait()
+        XCTAssertEqual(results.map(\.clockReliable), [false])
+    }
+
+    private func stubbedAPI(_ reply: StubCamera.Reply) -> CameraAPI {
+        let reply = UncheckedReply(value: reply)
+        let session = StubCamera.session { _ in reply.value }
+        return CameraAPI(client: SonyClient(baseURL: URL(string: "http://stub.invalid/sony")!, session: session))
+    }
+
+    func testStoppingDuringACameraCallIsNotAnError() async throws {
+        let runner = JobRunner(ticker: FakeTicker())
+        runner.start(.single, on: stubbedAPI(.hang))
+        try await Task.sleep(for: .milliseconds(100))
+        runner.stop()
+        await runner.wait()
+        XCTAssertNil(runner.lastError)
+        XCTAssertFalse(runner.isRunning)
+    }
+
+    func testLosingTheCameraDuringAShotIsReported() async {
+        let runner = JobRunner(ticker: FakeTicker())
+        runner.start(.single, on: stubbedAPI(.transportFailure(.networkConnectionLost)))
+        await runner.wait()
+        XCTAssertNotNil(runner.lastError)
     }
 
     func testSelfTimerShotIsNotUsedForClockSync() async throws {
