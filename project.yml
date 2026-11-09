@@ -1,0 +1,84 @@
+name: LightRemote
+options:
+  bundleIdPrefix: com.andrewyao
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: T48N4FTKPL
+    CODE_SIGN_STYLE: Automatic
+targets:
+  LightRemote:
+    type: application
+    platform: iOS
+    sources: [LightRemote]
+    dependencies:
+      - target: LightRemoteWidget
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewyao.LightRemote
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: LightRemote/LightRemote.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: LightRemote/Info.plist
+      properties:
+        CFBundleDisplayName: LightRemote
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes: [location]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSSupportsLiveActivities: true
+        NSLocalNetworkUsageDescription: LightRemote talks to your Sony camera over its Wi-Fi network.
+        NSLocationWhenInUseUsageDescription: LightRemote records a GPS track so your photos can be geotagged.
+        NSLocationAlwaysAndWhenInUseUsageDescription: LightRemote keeps recording your GPS track while the screen is locked, so photos taken on the camera can be geotagged later.
+        NSPhotoLibraryAddUsageDescription: LightRemote saves camera previews to Photos with their location.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSUbiquitousContainers:
+          iCloud.com.andrewyao.LightRemote:
+            NSUbiquitousContainerIsDocumentScopePublic: true
+            NSUbiquitousContainerName: LightRemote
+            NSUbiquitousContainerSupportedFolderLevels: Any
+  LightRemoteWidget:
+    type: app-extension
+    platform: iOS
+    sources: [LightRemoteWidget, LightRemote/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.andrewyao.LightRemote.Widget
+    info:
+      path: LightRemoteWidget/Info.plist
+      properties:
+        CFBundleDisplayName: LightRemote
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+  LightRemoteTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [LightRemoteTests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: LightRemote
+schemes:
+  LightRemote:
+    build:
+      targets:
+        LightRemote: all
+        LightRemoteTests: [test]
+    test:
+      targets: [LightRemoteTests]
