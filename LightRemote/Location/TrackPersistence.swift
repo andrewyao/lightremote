@@ -26,9 +26,9 @@ final class TrackPersistence {
         return Set(logs.compactMap { log -> String? in
             let day = log.deletingPathExtension().lastPathComponent
             guard log.pathExtension == "json", Self.validDay(day) else { return nil }
-            let gpx = folder.appendingPathComponent("\(day).gpx")
+            let gpx = folder.appendingPathComponent(GPX.relativePath(day: day))
             // An iCloud file that isn't downloaded shows up only as a placeholder; treat it as current.
-            let placeholder = folder.appendingPathComponent(".\(day).gpx.icloud")
+            let placeholder = gpx.deletingLastPathComponent().appendingPathComponent(".\(day).gpx.icloud")
             guard let exported = Self.modified(gpx) ?? (fm.fileExists(atPath: placeholder.path) ? .distantFuture : nil)
             else { return day }
             return (Self.modified(log) ?? .distantPast) > exported ? day : nil
@@ -76,7 +76,7 @@ final class TrackPersistence {
         for day in localExports {
             do {
                 guard let log = load(day) else { throw CocoaError(.fileReadCorruptFile) }
-                try write(Data(GPX.render(log).utf8), localGPX.appendingPathComponent("\(day).gpx"), false)
+                try write(Data(GPX.render(log).utf8), localGPX.appendingPathComponent(GPX.relativePath(day: day)), false)
                 localExports.remove(day)
             } catch { errors.append("GPX \(day): \(error.localizedDescription)") }
         }
@@ -84,7 +84,7 @@ final class TrackPersistence {
             for day in cloudExports {
                 do {
                     guard let log = load(day) else { throw CocoaError(.fileReadCorruptFile) }
-                    try write(Data(GPX.render(log).utf8), cloudGPX.appendingPathComponent("\(day).gpx"), true)
+                    try write(Data(GPX.render(log).utf8), cloudGPX.appendingPathComponent(GPX.relativePath(day: day)), true)
                     cloudExports.remove(day)
                 } catch { errors.append("iCloud GPX \(day): \(error.localizedDescription)") }
             }

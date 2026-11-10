@@ -35,7 +35,7 @@ struct TrackView: View {
                     if track.gpxFiles.isEmpty { Text("No GPX files yet").foregroundStyle(.secondary) }
                 } header: { Text("GPX files") } footer: {
                     Text(track.usesICloud
-                         ? "Saved in iCloud Drive › LightRemote › GPX. They sync to your Mac automatically."
+                         ? "Saved in iCloud Drive › LightRemote › GPX, in a folder per year and month. They sync to your Mac automatically."
                          : "Saved in Files › On My iPhone › LightRemote › GPX. Turn on iCloud Drive to sync them to your Mac automatically.")
                 }
             }

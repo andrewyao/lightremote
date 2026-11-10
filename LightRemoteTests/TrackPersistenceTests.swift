@@ -48,12 +48,12 @@ final class TrackPersistenceTests: XCTestCase {
         log.shots = [Date()]
         first.stage(log)
         XCTAssertNotNil(first.flush())
-        XCTAssertTrue(FileManager.default.fileExists(atPath: local.appendingPathComponent("2026-11-08.gpx").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: local.appendingPathComponent("2026/11/2026-11-08.gpx").path))
         failCloud = false
         let relaunched = TrackPersistence(logFolder: logs, localGPX: local, write: writer)
         relaunched.setCloudFolder(cloud)
         XCTAssertNil(relaunched.flush())
-        XCTAssertEqual(try Data(contentsOf: cloud.appendingPathComponent("2026-11-08.gpx")),
+        XCTAssertEqual(try Data(contentsOf: cloud.appendingPathComponent("2026/11/2026-11-08.gpx")),
                        Data(GPX.render(log).utf8))
     }
 
@@ -74,13 +74,39 @@ final class TrackPersistenceTests: XCTestCase {
         for day in ["2026-11-07", "2026-11-08", "2026-11-09"] { first.stage(DayLog(day: day)) }
         XCTAssertNil(first.flush())
 
-        try FileManager.default.removeItem(at: local.appendingPathComponent("2026-11-07.gpx"))
+        try FileManager.default.removeItem(at: local.appendingPathComponent("2026/11/2026-11-07.gpx"))
         try FileManager.default.setAttributes([.modificationDate: Date.distantPast],
-                                              ofItemAtPath: cloud.appendingPathComponent("2026-11-08.gpx").path)
+                                              ofItemAtPath: cloud.appendingPathComponent("2026/11/2026-11-08.gpx").path)
         writes = []
         let relaunched = TrackPersistence(logFolder: logs, localGPX: local, write: writer)
         relaunched.setCloudFolder(cloud)
         XCTAssertNil(relaunched.flush())
         XCTAssertEqual(Set(writes), ["2026-11-07.gpx", "cloud/2026-11-08.gpx"])
+    }
+
+    func testUndownloadedICloudPlaceholderInMonthFolderCountsAsExported() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logs = root.appendingPathComponent("logs")
+        let local = root.appendingPathComponent("local")
+        let cloud = root.appendingPathComponent("cloud")
+        var writes: [String] = []
+        let writer: TrackPersistence.Writer = { data, url, coordinated in
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            writes.append((coordinated ? "cloud/" : "") + url.lastPathComponent)
+        }
+        let first = TrackPersistence(logFolder: logs, localGPX: local, write: writer)
+        first.setCloudFolder(cloud)
+        first.stage(DayLog(day: "2025-01-31"))
+        XCTAssertNil(first.flush())
+        let month = cloud.appendingPathComponent("2025/01")
+        try FileManager.default.removeItem(at: month.appendingPathComponent("2025-01-31.gpx"))
+        FileManager.default.createFile(atPath: month.appendingPathComponent(".2025-01-31.gpx.icloud").path, contents: Data())
+        writes = []
+        let relaunched = TrackPersistence(logFolder: logs, localGPX: local, write: writer)
+        relaunched.setCloudFolder(cloud)
+        XCTAssertNil(relaunched.flush())
+        XCTAssertEqual(writes, [])
     }
 }

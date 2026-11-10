@@ -22,7 +22,7 @@ struct ClockOffsetEntry: Codable, Equatable, Sendable {
     var cameraMinusUTCSeconds: Int
 }
 
-/// Everything recorded on one local calendar day; rendered to `GPX/<day>.gpx`.
+/// Everything recorded on one local calendar day; rendered to `GPX/YYYY/MM/<day>.gpx`.
 struct DayLog: Codable, Equatable, Sendable {
     var day: String
     var points: [TrackPoint] = []
@@ -87,6 +87,11 @@ struct DayLog: Codable, Equatable, Sendable {
 
 enum GPX {
     static let namespace = "https://lightremote.app/gpx/1"
+
+    /// `YYYY/MM/YYYY-MM-DD.gpx`, so a month's tracks can be picked up as one folder.
+    static func relativePath(day: String) -> String {
+        "\(day.prefix(4))/\(day.dropFirst(5).prefix(2))/\(day).gpx"
+    }
 
     static func render(_ log: DayLog) -> String {
         let iso = ISO8601DateFormatter()

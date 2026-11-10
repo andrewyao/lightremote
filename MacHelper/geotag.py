@@ -162,7 +162,7 @@ def main():
 
     if not shutil.which("exiftool"):
         sys.exit("exiftool not found. Install it with: brew install exiftool")
-    gpx_files = sorted(glob.glob(os.path.join(os.path.expanduser(args.gpx_dir), "*.gpx")))
+    gpx_files = sorted(glob.glob(os.path.join(os.path.expanduser(args.gpx_dir), "**", "*.gpx"), recursive=True))
     if not gpx_files:
         sys.exit(f"No GPX files in {args.gpx_dir}. Use --gpx-dir to point at them.")
     tracks = {}

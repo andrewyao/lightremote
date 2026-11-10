@@ -2,7 +2,7 @@ import CoreLocation
 import Foundation
 import Observation
 
-/// Records the GPS track (one DayLog per local day), persists it, and writes `GPX/<day>.gpx`
+/// Records the GPS track (one DayLog per local day), persists it, and writes `GPX/YYYY/MM/<day>.gpx`
 /// to iCloud Drive (or the app's Documents folder when iCloud isn't available).
 @MainActor @Observable
 final class TrackRecorder {
@@ -134,7 +134,8 @@ final class TrackRecorder {
     }
 
     var gpxFiles: [URL] {
-        ((try? FileManager.default.contentsOfDirectory(at: persistence.localGPX, includingPropertiesForKeys: nil)) ?? [])
+        (FileManager.default.enumerator(at: persistence.localGPX, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL } ?? [])
             .filter { $0.pathExtension == "gpx" }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
