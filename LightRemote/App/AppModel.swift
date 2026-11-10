@@ -18,6 +18,13 @@ final class AppModel {
         camera.onEventPostviews = { [weak self] urls in
             self?.handle(ShotResult(urls: urls, takenAt: Date(), clockReliable: false))
         }
+        camera.onConnecting = { [weak self] in
+            guard let self else { return }
+            self.gallery.beginSession(self.camera.sessionID, baseURL: CameraController.configuredBase)
+        }
+        camera.onClockSynchronized = { [weak self] date in
+            self?.track.noteClockOffset(cameraMinusUTC: TimeZone.current.secondsFromGMT(for: date), at: date)
+        }
         camera.onConnected = { [weak self] in
             guard let self, UserDefaults.standard.object(forKey: "autoTrack") as? Bool ?? true else { return }
             if !self.track.isRecording { self.track.start(); self.preciseFromCamera = true }
@@ -34,6 +41,7 @@ final class AppModel {
     }
 
     func start(_ job: ShootingJob) {
+        guard camera.connection == .connected, !camera.isChangingMode else { return }
         runner.start(job, on: camera.api)
     }
 
@@ -42,9 +50,11 @@ final class AppModel {
         let ingestion = gallery.ingest(result.urls, takenAt: result.takenAt, settings: camera.state, location: point)
         if ingestion.isNewShot { track.noteShot(at: result.takenAt) }
         guard result.clockReliable else { return }
+        let session = camera.sessionID
         Task {
             guard let wall = await ingestion.results.value.first?.cameraWallClock else { return }
-            let seconds = Int(wall.timeIntervalSince(result.takenAt).rounded())
+            guard camera.sessionID == session,
+                  let seconds = Int(exactly: wall.timeIntervalSince(result.takenAt).rounded()) else { return }
             track.noteClockOffset(cameraMinusUTC: seconds, at: result.takenAt)
         }
     }

@@ -13,7 +13,11 @@ struct EVSetting: Sendable, Equatable {
     var step: Int
 
     var stepSize: Double { step == 2 ? 0.5 : 1.0 / 3.0 }
-    var indices: [Int] { minIndex <= maxIndex ? Array(minIndex...maxIndex) : [] }
+    var indices: [Int] {
+        guard (-100...100).contains(minIndex), (-100...100).contains(maxIndex),
+              minIndex <= maxIndex else { return [] }
+        return Array(minIndex...maxIndex)
+    }
     func ev(_ index: Int) -> Double { Double(index) * stepSize }
     static func label(_ ev: Double) -> String { ev == 0 ? "±0.0" : String(format: "%+.1f", ev) }
 }
@@ -63,22 +67,25 @@ struct CameraEvent: Sendable, Equatable {
         case "isoSpeedRate": iso = setting("isoSpeedRate")
         case "focusMode": focusMode = setting("focusMode")
         case "selfTimer":
-            if let cur = o["currentSelfTimer"]?.int {
-                selfTimer = Setting(current: cur, candidates: o["selfTimerCandidates"]?.array?.compactMap(\.int) ?? [])
+            if let cur = o["currentSelfTimer"]?.int, (0...60).contains(cur) {
+                selfTimer = Setting(current: cur, candidates: o["selfTimerCandidates"]?.array?.compactMap(\.int)
+                    .filter { (0...60).contains($0) } ?? [])
             }
         case "exposureCompensation":
-            if let cur = o["currentExposureCompensation"]?.int {
+            if let cur = o["currentExposureCompensation"]?.int, (-100...100).contains(cur),
+               let min = o["minExposureCompensation"]?.int, let max = o["maxExposureCompensation"]?.int,
+               (-100...100).contains(min), (-100...100).contains(max), min <= cur, cur <= max {
                 exposureCompensation = EVSetting(
                     currentIndex: cur,
-                    minIndex: o["minExposureCompensation"]?.int ?? 0,
-                    maxIndex: o["maxExposureCompensation"]?.int ?? 0,
+                    minIndex: min,
+                    maxIndex: max,
                     step: o["stepIndexOfExposureCompensation"]?.int ?? 1)
             }
         case "storageInformation":
             if let n = o["numberOfRecordableImages"]?.int, n >= 0 { recordableImages = n }
         case "batteryInfo":
-            if let num = o["levelNumer"]?.int, let den = o["levelDenom"]?.int, den > 0, num >= 0 {
-                batteryPercent = num * 100 / den
+            if let num = o["levelNumer"]?.int, let den = o["levelDenom"]?.int, den > 0, num >= 0, num <= den {
+                batteryPercent = Int((Double(num) / Double(den) * 100).rounded(.towardZero))
             }
         default: break
         }

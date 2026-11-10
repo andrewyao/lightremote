@@ -17,14 +17,7 @@ struct ConnectView: View {
             }
             .navigationTitle("LightRemote")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { TrackChip() } }
-            .task {
-                // Keep trying while this screen is up: joining the camera's Wi-Fi is the only step.
-                while !Task.isCancelled {
-                    let c = model.camera
-                    if c.autoConnect, c.connection != .connected, c.connection != .connecting { await c.connect() }
-                    try? await Task.sleep(for: .seconds(3))
-                }
-            }
+            .task { await model.camera.search() }
         }
     }
 

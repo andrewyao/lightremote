@@ -47,26 +47,10 @@ struct DayLog: Codable, Equatable, Sendable {
         }
     }
 
-    /// Appends a point. If the phone sat still (battery saver sends nothing then, so there's a long gap) and the
-    /// new point is close to the last one, the stay is filled with the last position every `fillEvery` seconds.
-    /// Lightroom and exiftool skip gaps over ~10 min, so without this, photos taken while standing still
-    /// would get no location.
-    mutating func appendFillingStationaryGap(_ p: TrackPoint, minGap: TimeInterval = 120, maxDrift: Double = 250,
-                                             fillEvery: TimeInterval = 240) {
-        if let last = points.last, p.time.timeIntervalSince(last.time) > minGap,
-           Self.meters(last, p) <= maxDrift {
-            var t = last.time.addingTimeInterval(fillEvery)
-            while t < p.time.addingTimeInterval(-1) {
-                var stay = last
-                stay.time = t
-                points.append(stay)
-                t = t.addingTimeInterval(fillEvery)
-            }
-            var stay = last
-            stay.time = p.time.addingTimeInterval(-1)
-            points.append(stay)
-        }
-        points.append(p)
+    /// Missing fixes are unknown travel, even when the next fix returns to the same place.
+    mutating func append(_ point: TrackPoint) {
+        guard points.last.map({ $0.time < point.time }) ?? true else { return }
+        points.append(point)
     }
 
     static func meters(_ a: TrackPoint, _ b: TrackPoint) -> Double {
@@ -75,12 +59,6 @@ struct DayLog: Codable, Equatable, Sendable {
         let h = sin(dLat / 2) * sin(dLat / 2)
             + cos(a.latitude * rad) * cos(b.latitude * rad) * sin(dLon / 2) * sin(dLon / 2)
         return 2 * r * asin(min(1, sqrt(h)))
-    }
-
-    /// Median of the day's clock measurements: robust against one shot with a slow round trip.
-    var cameraMinusUTC: Int? {
-        let s = clockOffsets.map(\.cameraMinusUTCSeconds).sorted()
-        return s.isEmpty ? nil : s[s.count / 2]
     }
 
     /// Nearest fix within `tolerance`, interpolated between neighbours.

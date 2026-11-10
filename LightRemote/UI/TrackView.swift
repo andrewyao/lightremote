@@ -16,6 +16,12 @@ struct TrackView: View {
                     Text("Keeps running with the screen locked. If iOS or you close LightRemote, it restarts the next time you move a few hundred metres (needs “Always” location).")
                 }
 
+                if let error = track.lastError {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                        Button("Retry saving") { track.flush() }
+                    }
+                }
                 clockSection
 
                 Section {

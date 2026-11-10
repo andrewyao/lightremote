@@ -47,6 +47,30 @@ final class ParsingTests: XCTestCase {
         XCTAssertNil(e.focusMode, "not reported → hidden in the UI")
     }
 
+    func testUntrustedNumbersCannotTrapOrAllocateHugeRanges() throws {
+        for text in ["1e30", "-1e30", "1.5"] {
+            XCTAssertNil(try JSONDecoder().decode(JSON.self, from: Data(text.utf8)).int)
+        }
+        XCTAssertEqual(JSON.number(42).int, 42)
+        XCTAssertNil(JSON.number(.infinity).int)
+        XCTAssertNil(JSON.number(.nan).int)
+        let event = CameraEvent(result: [
+            ["type": "batteryInfo", "levelNumer": .number(Double(Int.max)), "levelDenom": .number(Double(Int.max))],
+            ["type": "exposureCompensation", "currentExposureCompensation": 0,
+             "minExposureCompensation": -1000000000, "maxExposureCompensation": 1000000000],
+        ])
+        XCTAssertNil(event.exposureCompensation)
+        XCTAssertNil(event.batteryPercent)
+        let battery = CameraEvent(result: [["type": "batteryInfo", "levelNumer": 9000000000000000,
+                                           "levelDenom": 9000000000000000]])
+        XCTAssertEqual(battery.batteryPercent, 100)
+        XCTAssertTrue(EVSetting(currentIndex: 0, minIndex: Int.min, maxIndex: Int.max, step: 1).indices.isEmpty)
+    }
+
+    func testMalformedRPCResponseIsRejected() {
+        XCTAssertThrowsError(try SonyClient.parseResponse(Data(#"{"message":"unavailable"}"#.utf8)))
+    }
+
     // MARK: Live view
 
     private func packet(type: UInt8, seq: UInt16, payload: [UInt8], padding: Int = 0) -> Data {

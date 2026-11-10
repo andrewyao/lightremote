@@ -31,27 +31,33 @@ final class TrackRecorder {
     private let engine = LocationEngine()
     private var flushTask: Task<Void, Never>?
     private var background: CLBackgroundActivitySession?
-    private let logFolder: URL
+    private let persistence: TrackPersistence
     private var dirty = false
+    private var shotFixPending = false
+    private(set) var lastError: String?
 
     private static let recordingKey = "trackRecording"
     private static let allDayKey = "trackAllDay"
     static let lowPowerSpacing: TimeInterval = 30
     static let lowPowerDistance: CLLocationDistance = 100
+    static let preciseDistance: CLLocationDistance = 5
+    /// A shot needs a real fix this close in time; geotag.py and `location(at:)` accept up to 300 s.
+    static let shotFixMaxAge: TimeInterval = 60
 
     init() {
         let fm = FileManager.default
-        logFolder = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let logFolder = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Tracks", isDirectory: true)
         let localGPX = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("GPX", isDirectory: true)
         gpxFolder = localGPX
+        persistence = TrackPersistence(logFolder: logFolder, localGPX: localGPX)
         try? fm.createDirectory(at: logFolder, withIntermediateDirectories: true)
         try? fm.createDirectory(at: localGPX, withIntermediateDirectories: true)
         authorization = manager.authorizationStatus
         allDay = UserDefaults.standard.object(forKey: Self.allDayKey) as? Bool ?? true
         let day = DayLog.dayString(Date())
-        today = Self.load(day, from: logFolder) ?? DayLog(day: day)
+        today = persistence.load(day) ?? DayLog(day: day)
 
         Task { await resolveICloudFolder() }
         NotificationCenter.default.addObserver(forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main) { _ in
@@ -74,6 +80,7 @@ final class TrackRecorder {
     private func applyMode() {
         let new: Mode = isRecording ? .precise : allDay ? .lowPower : .off
         let canBackground = authorization == .authorizedAlways || (isRecording && authorization == .authorizedWhenInUse)
+        shotFixPending = false
         switch new {
         case .off:
             manager.stopUpdatingLocation()
@@ -88,7 +95,7 @@ final class TrackRecorder {
             if authorization == .authorizedAlways { manager.startMonitoringSignificantLocationChanges() }
         case .precise:
             manager.desiredAccuracy = kCLLocationAccuracyBest
-            manager.distanceFilter = 5
+            manager.distanceFilter = Self.preciseDistance
             manager.activityType = .fitness
             manager.pausesLocationUpdatesAutomatically = false
             manager.allowsBackgroundLocationUpdates = canBackground
@@ -102,7 +109,7 @@ final class TrackRecorder {
             noteTimeZone()
             flushTask = Task { [weak self] in
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(60))
+                    do { try await Task.sleep(for: .seconds(60)) } catch { return }
                     self?.flush()
                 }
             }
@@ -112,30 +119,22 @@ final class TrackRecorder {
         mode = new
     }
 
-    /// iCloud lookup can block, so it runs off the main thread. Existing local GPX files are copied over.
+    /// Container discovery can block, so only discovery runs away from the main actor.
     private func resolveICloudFolder() async {
-        let local = gpxFolder
         let cloud: URL? = await Task.detached {
-            guard let root = FileManager.default.url(forUbiquityContainerIdentifier: nil) else { return nil }
-            let folder = root.appendingPathComponent("Documents/GPX", isDirectory: true)
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            for f in (try? FileManager.default.contentsOfDirectory(at: local, includingPropertiesForKeys: nil)) ?? [] {
-                let target = folder.appendingPathComponent(f.lastPathComponent)
-                if !FileManager.default.fileExists(atPath: target.path) {
-                    try? FileManager.default.copyItem(at: f, to: target)
-                }
-            }
-            return folder
+            FileManager.default.url(forUbiquityContainerIdentifier: nil)?
+                .appendingPathComponent("Documents/GPX", isDirectory: true)
         }.value
         if let cloud {
+            persistence.setCloudFolder(cloud)
             gpxFolder = cloud
             usesICloud = true
-            writeGPX()
+            flush()
         }
     }
 
     var gpxFiles: [URL] {
-        ((try? FileManager.default.contentsOfDirectory(at: gpxFolder, includingPropertiesForKeys: nil)) ?? [])
+        ((try? FileManager.default.contentsOfDirectory(at: persistence.localGPX, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "gpx" }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
@@ -171,18 +170,32 @@ final class TrackRecorder {
         if let last = today.points.last {
             if last.time >= p.time { return }
             // Low power: drop bursts; a point per ~100 m moved is plenty for geotagging.
-            if !precise, p.time.timeIntervalSince(last.time) < Self.lowPowerSpacing { return }
+            if !precise, !shotFixPending, p.time.timeIntervalSince(last.time) < Self.lowPowerSpacing { return }
         }
         today.noteUTCOffset(at: p.time)
-        today.appendFillingStationaryGap(p)
+        today.append(p)
         lastFix = p
         dirty = true
+        if shotFixPending {
+            shotFixPending = false
+            manager.distanceFilter = precise ? Self.preciseDistance : Self.lowPowerDistance
+        }
     }
 
     func noteShot(at date: Date) {
         rollDayIfNeeded(date)
         today.shots.append(date)
         dirty = true
+        requestShotFix(at: date)
+    }
+
+    /// The distance filter sends nothing while the phone stands still (tripod, timelapse), which would leave
+    /// the shot without a nearby fix. Lift the filter until the next real fix arrives instead of inventing one.
+    private func requestShotFix(at date: Date) {
+        guard mode != .off, !shotFixPending else { return }
+        if let lastFix, abs(lastFix.time.timeIntervalSince(date)) <= Self.shotFixMaxAge { return }
+        shotFixPending = true
+        manager.distanceFilter = kCLDistanceFilterNone
     }
 
     func noteClockOffset(cameraMinusUTC seconds: Int, at date: Date) {
@@ -205,38 +218,18 @@ final class TrackRecorder {
         let day = DayLog.dayString(date)
         guard day != today.day else { return }
         flush()
-        today = Self.load(day, from: logFolder) ?? DayLog(day: day)
+        today = persistence.load(day) ?? DayLog(day: day)
         today.noteUTCOffset(at: date)
+        dirty = true
     }
 
-    /// Writes the JSON log and the GPX. Each write replaces the whole file, so a crash can't corrupt it.
+    /// Failed snapshots remain queued even when a new day becomes active.
     func flush() {
-        guard dirty else { return }
-        dirty = false
-        if let data = try? JSONEncoder().encode(today) {
-            try? data.write(to: logFolder.appendingPathComponent("\(today.day).json"), options: .atomic)
+        if dirty {
+            persistence.stage(today)
+            dirty = false // The persistence queue now owns this snapshot until all writes succeed.
         }
-        writeGPX()
-    }
-
-    private func writeGPX() {
-        guard !today.points.isEmpty || !today.shots.isEmpty else { return }
-        let url = gpxFolder.appendingPathComponent("\(today.day).gpx")
-        let text = GPX.render(today)
-        if usesICloud {
-            // Coordinated write so iCloud picks up the change.
-            var error: NSError?
-            NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &error) { u in
-                try? text.write(to: u, atomically: true, encoding: .utf8)
-            }
-        } else {
-            try? text.write(to: url, atomically: true, encoding: .utf8)
-        }
-    }
-
-    private static func load(_ day: String, from folder: URL) -> DayLog? {
-        guard let data = try? Data(contentsOf: folder.appendingPathComponent("\(day).json")) else { return nil }
-        return try? JSONDecoder().decode(DayLog.self, from: data)
+        lastError = persistence.flush()
     }
 
     // MARK: Clock / DST status for the Track screen

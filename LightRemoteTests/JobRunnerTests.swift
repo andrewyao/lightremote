@@ -167,4 +167,77 @@ final class JobRunnerTests: XCTestCase {
         XCTAssertEqual(shooter.calls, ["timer 10", "shot", "timer 0"])
         XCTAssertEqual(results.map(\.clockReliable), [false])
     }
+    func testCancelledStartStillAttemptsToStopBulbAndMovie() async {
+        for job in [ShootingJob.bulb(duration: .seconds(10)), .movie] {
+            let shooter = InterruptedStartShooter()
+            let runner = JobRunner(ticker: FakeTicker())
+            runner.start(job, on: shooter)
+            await runner.wait()
+            let stops = await shooter.stops
+            XCTAssertEqual(stops, 1)
+            XCTAssertFalse(runner.isRunning)
+            XCTAssertNil(runner.lastError)
+        }
+    }
+
+    func testTransportFailureAfterStartStillAttemptsStop() async {
+        let shooter = InterruptedStartShooter(transportFailure: true)
+        let runner = JobRunner(ticker: FakeTicker())
+        runner.start(.movie, on: shooter)
+        await runner.wait()
+        let stops = await shooter.stops
+        XCTAssertEqual(stops, 1)
+        XCTAssertNotNil(runner.lastError)
+    }
+
+    func testUserStopWhileStartRequestIsPendingStillClosesCameraSession() async {
+        for job in [ShootingJob.bulb(duration: .seconds(10)), .movie] {
+            let shooter = InterruptedStartShooter(waitForCancellation: true)
+            let runner = JobRunner(ticker: FakeTicker())
+            runner.start(job, on: shooter)
+            while !(await shooter.started) { await Task.yield() }
+            runner.stop()
+            await runner.wait()
+            let stops = await shooter.stops
+            XCTAssertEqual(stops, 1)
+            XCTAssertNil(runner.lastError)
+        }
+    }
+
+    func testStopFailureIsReportedInsteadOfPretendingTheCameraStopped() async {
+        let shooter = InterruptedStartShooter(stopFails: true)
+        let runner = JobRunner(ticker: FakeTicker())
+        runner.start(.movie, on: shooter)
+        await runner.wait()
+        XCTAssertNotNil(runner.lastError)
+    }
+
+}
+
+private actor InterruptedStartShooter: Shooter {
+    let transportFailure: Bool
+    let stopFails: Bool
+    let waitForCancellation: Bool
+    private(set) var started = false
+    private(set) var stops = 0
+    init(transportFailure: Bool = false, stopFails: Bool = false, waitForCancellation: Bool = false) {
+        self.transportFailure = transportFailure
+        self.stopFails = stopFails
+        self.waitForCancellation = waitForCancellation
+    }
+    func takePicture() async throws -> [URL] { [] }
+    func setSelfTimer(_ seconds: Int) async throws {}
+    func startBulb() async throws {
+        started = true
+        if waitForCancellation { try await Task.sleep(for: .seconds(60)) }
+        if transportFailure { throw URLError(.networkConnectionLost) }
+        throw CancellationError()
+    }
+    func startMovie() async throws { try await startBulb() }
+    func stopBulb() async throws {
+        try Task.checkCancellation()
+        stops += 1
+        if stopFails { throw URLError(.notConnectedToInternet) }
+    }
+    func stopMovie() async throws { try await stopBulb() }
 }

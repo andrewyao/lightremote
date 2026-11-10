@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import Photos
 import UIKit
 
 struct Shot: Codable, Identifiable, Equatable, Sendable {
@@ -13,6 +12,7 @@ struct Shot: Codable, Identifiable, Equatable, Sendable {
     var iso: String?
     var latitude: Double?
     var longitude: Double?
+    var sessionID: UUID?
     var savedToPhotos = false
 }
 
@@ -21,22 +21,35 @@ struct Shot: Codable, Identifiable, Equatable, Sendable {
 final class PostviewStore {
     private(set) var shots: [Shot] = []
     var lastError: String?
-    private let folder: URL
-    private var thumbnails: [UUID: UIImage] = [:]
+    private let files: PreviewFiles
+    private let downloader: any PreviewDownloading
+    private let thumbnails = NSCache<NSUUID, UIImage>()
+    private var sessionID: UUID?
+    private var policy: CameraResourcePolicy
     private var downloads: [String: Task<Ingested?, Never>] = [:]
+    private var activeDownloads = 0
+    private var waitingDownloads: [CheckedContinuation<Void, Never>] = []
+    private let shotLimit: Int
+    static let concurrentDownloads = 4
 
-    init(folder: URL? = nil) {
-        self.folder = folder ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Postviews", isDirectory: true)
-        try? FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
-        if let data = try? Data(contentsOf: indexURL), let saved = try? JSONDecoder().decode([Shot].self, from: data) {
-            shots = saved
-        }
+    init(folder: URL? = nil, downloader: any PreviewDownloading = CameraPreviewDownloader(),
+         baseURL: URL = CameraController.configuredBase, shotLimit: Int = 2000) {
+        self.shotLimit = shotLimit
+        files = PreviewFiles(folder: folder)
+        self.downloader = downloader
+        policy = CameraResourcePolicy(baseURL: baseURL)
+        thumbnails.countLimit = 100
+        do { shots = try files.load() }
+        catch { lastError = "Couldn't load gallery: \(error.localizedDescription)" }
     }
 
-    private var indexURL: URL { folder.appendingPathComponent("index.json") }
+    func beginSession(_ id: UUID, baseURL: URL) {
+        downloads.values.forEach { $0.cancel() }
+        sessionID = id
+        policy = CameraResourcePolicy(baseURL: baseURL)
+    }
 
-    func fileURL(_ shot: Shot) -> URL { folder.appendingPathComponent(shot.fileName) }
+    func fileURL(_ shot: Shot) -> URL { files.url(for: shot.fileName) }
 
     struct Ingested: Sendable { var shot: Shot; var cameraWallClock: Date? }
 
@@ -50,12 +63,27 @@ final class PostviewStore {
     /// before returning, so the first report starts the download and later ones share its result.
     func ingest(_ urls: [URL], takenAt: Date, settings: CameraEvent, location: TrackPoint?) -> Ingestion {
         var isNewShot = urls.isEmpty
-        let tasks = urls.compactMap { url -> Task<Ingested?, Never>? in
-            let key = url.absoluteString
+        let tasks = urls.prefix(32).compactMap { url -> Task<Ingested?, Never>? in
+            let key = "\(sessionID?.uuidString ?? "legacy"):\(url.absoluteString)"
             if let existing = downloads[key] { return existing }
-            if shots.contains(where: { $0.sourceURL == key }) { return nil }
+            if let shot = shots.first(where: { $0.sourceURL == url.absoluteString && $0.sessionID == sessionID }) {
+                return Task {
+                    let data = try? Data(contentsOf: fileURL(shot))
+                    return Ingested(shot: shot, cameraWallClock: data.flatMap(GeoTagger.cameraWallClock))
+                }
+            }
+            guard policy.allows(url) else {
+                lastError = "Preview rejected: not served by the camera."
+                return nil
+            }
             isNewShot = true
-            let task = Task { await download(url, takenAt: takenAt, settings: settings, location: location) }
+            let session = sessionID
+            let policy = self.policy
+            let task = Task {
+                defer { downloads[key] = nil }
+                return await download(url, takenAt: takenAt, settings: settings, location: location,
+                                      session: session, policy: policy)
+            }
             downloads[key] = task
             return task
         }
@@ -68,31 +96,61 @@ final class PostviewStore {
         })
     }
 
-    private func download(_ url: URL, takenAt: Date, settings: CameraEvent, location: TrackPoint?) async -> Ingested? {
+    private func download(_ url: URL, takenAt: Date, settings: CameraEvent, location: TrackPoint?,
+                          session: UUID?, policy: CameraResourcePolicy) async -> Ingested? {
+        await acquireDownloadSlot()
+        defer { releaseDownloadSlot() }
         do {
-            var request = URLRequest(url: url, timeoutInterval: 20)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            let (data, _) = try await URLSession.shared.data(for: request)
-            let name = "\(Int(takenAt.timeIntervalSince1970 * 1000))-\(url.lastPathComponent)"
-            try data.write(to: folder.appendingPathComponent(name), options: .atomic)
+            try Task.checkCancellation()
+            let data = try await downloader.download(url, policy: policy)
+            try Task.checkCancellation()
+            guard session == sessionID else { return nil }
+            let name = UUID().uuidString + ".jpg"
+            try makeRoom(for: data.count)
+            try files.write(data, named: name)
             let shot = Shot(takenAt: takenAt, fileName: name, sourceURL: url.absoluteString,
                             fNumber: settings.fNumber?.current, shutterSpeed: settings.shutterSpeed?.current,
-                            iso: settings.iso?.current, latitude: location?.latitude, longitude: location?.longitude)
+                            iso: settings.iso?.current, latitude: location?.latitude, longitude: location?.longitude, sessionID: session)
             shots.insert(shot, at: 0)
             saveIndex()
             return Ingested(shot: shot, cameraWallClock: GeoTagger.cameraWallClock(of: data))
+        } catch is CancellationError {
+            return nil
         } catch {
-            downloads[url.absoluteString] = nil
             lastError = "Couldn't download preview: \(error.localizedDescription)"
             return nil
         }
     }
 
+    /// The camera serves one transfer at a time anyway; extra previews wait their turn instead of being dropped.
+    private func acquireDownloadSlot() async {
+        if activeDownloads < Self.concurrentDownloads { activeDownloads += 1; return }
+        await withCheckedContinuation { waitingDownloads.append($0) }   // the releaser hands over its slot
+    }
+
+    private func releaseDownloadSlot() {
+        if waitingDownloads.isEmpty { activeDownloads -= 1 } else { waitingDownloads.removeFirst().resume() }
+    }
+
+    /// Previews are a cache of what's on the card: drop the oldest to stay within the count and byte limits.
+    private func makeRoom(for bytes: Int) throws {
+        var total = try files.totalBytes()
+        var evicted = false
+        while let oldest = shots.last, shots.count >= shotLimit || total + bytes > PreviewFiles.byteLimit {
+            total -= files.size(of: oldest.fileName)
+            try files.delete(oldest.fileName)
+            shots.removeLast()
+            thumbnails.removeObject(forKey: oldest.id as NSUUID)
+            evicted = true
+        }
+        if evicted { saveIndex() }
+    }
+
     func thumbnail(_ shot: Shot) -> UIImage? {
-        if let t = thumbnails[shot.id] { return t }
+        if let t = thumbnails.object(forKey: shot.id as NSUUID) { return t }
         guard let image = UIImage(contentsOfFile: fileURL(shot).path),
               let t = image.preparingThumbnail(of: CGSize(width: 240, height: 160)) else { return nil }
-        thumbnails[shot.id] = t
+        thumbnails.setObject(t, forKey: shot.id as NSUUID)
         return t
     }
 
@@ -100,25 +158,11 @@ final class PostviewStore {
 
     /// Saves to the Photos library with GPS written into EXIF and set as the asset location.
     func saveToPhotos(_ shot: Shot, point: TrackPoint?) async throws {
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else {
-            throw NSError(domain: "LightRemote", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Allow LightRemote to add photos in Settings."])
+        let point = point ?? shot.latitude.flatMap { latitude in
+            shot.longitude.map { TrackPoint(time: shot.takenAt, latitude: latitude, longitude: $0,
+                                             elevation: nil, accuracy: 10) }
         }
-        var data = try Data(contentsOf: fileURL(shot))
-        let point = point ?? shot.latitude.map {
-            TrackPoint(time: shot.takenAt, latitude: $0, longitude: shot.longitude ?? 0, elevation: nil, accuracy: 10)
-        }
-        if let point, let tagged = GeoTagger.addingGPS(to: data, point: point) { data = tagged }
-        let location = point.map { CLLocation(latitude: $0.latitude, longitude: $0.longitude) }
-        let takenAt = shot.takenAt
-        let jpeg = data
-        try await PHPhotoLibrary.shared().performChanges {
-            let request = PHAssetCreationRequest.forAsset()
-            request.addResource(with: .photo, data: jpeg, options: nil)
-            request.creationDate = takenAt
-            request.location = location
-        }
+        try await PhotosExporter.save(Data(contentsOf: fileURL(shot)), takenAt: shot.takenAt, point: point)
         if let i = shots.firstIndex(where: { $0.id == shot.id }) {
             shots[i].savedToPhotos = true
             if let point { shots[i].latitude = point.latitude; shots[i].longitude = point.longitude }
@@ -127,13 +171,15 @@ final class PostviewStore {
     }
 
     func delete(_ shot: Shot) {
-        try? FileManager.default.removeItem(at: fileURL(shot))
+        do { try files.delete(shot.fileName) }
+        catch { lastError = "Couldn't delete preview: \(error.localizedDescription)"; return }
         shots.removeAll { $0.id == shot.id }
-        thumbnails[shot.id] = nil
+        thumbnails.removeObject(forKey: shot.id as NSUUID)
         saveIndex()
     }
 
     private func saveIndex() {
-        if let data = try? JSONEncoder().encode(shots) { try? data.write(to: indexURL, options: .atomic) }
+        do { try files.save(shots) }
+        catch { lastError = "Couldn't save gallery: \(error.localizedDescription)" }
     }
 }

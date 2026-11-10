@@ -144,6 +144,7 @@ struct RemoteView: View {
     }
 
     private var canShoot: Bool {
+        if camera.isChangingMode { return false }
         if model.runner.isRunning { return true }   // the button stops the job
         switch settings.mode {
         case .movie: return isMovieMode && camera.can("startMovieRec")   // waits for the camera to switch

@@ -39,7 +39,8 @@ actor SonyClient {
                           "version": .string(version)]
         request.httpBody = try JSONEncoder().encode(body)
         do {
-            let (data, _) = try await session.data(for: request)
+            let data = try await CameraTransfer.fetch(request, policy: CameraResourcePolicy(baseURL: baseURL),
+                                                      limit: 1024 * 1024, configuration: session.configuration)
             return try Self.parseResponse(data)
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()   // URLSession's spelling of task cancellation
@@ -51,6 +52,9 @@ actor SonyClient {
         if let err = response["error"]?.array, let code = err.first?.int {
             throw SonyError(code: code, message: err.count > 1 ? err[1].string ?? "" : "")
         }
-        return response["result"]?.array ?? response["results"]?.array ?? []
+        guard let result = response["result"]?.array ?? response["results"]?.array else {
+            throw URLError(.cannotParseResponse)
+        }
+        return result
     }
 }

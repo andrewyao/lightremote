@@ -9,15 +9,17 @@ enum ShootingJob: Equatable, Sendable {
     case bulb(duration: Duration)
     case movie
 
-    var title: String {
+    var kind: ShootingKind {
         switch self {
-        case .single: "Single"
-        case .selfTimer: "Self-timer"
-        case .interval: "Interval"
-        case .bulb: "Bulb"
-        case .movie: "Movie"
+        case .single: .single
+        case .selfTimer: .selfTimer
+        case .interval: .interval
+        case .bulb: .bulb
+        case .movie: .movie
         }
     }
+    var title: String { kind.title }
+
 }
 
 /// The camera operations a job needs. `CameraAPI` conforms; tests use a recording fake.
@@ -121,12 +123,20 @@ final class JobRunner {
             try await shoot(shooter, clockReliable: true)
 
         case .selfTimer(let seconds):
-            try await shooter.setSelfTimer(seconds)
-            progress?.nextEventAt = ticker.now + .seconds(seconds)
-            defer { Task { try? await shooter.setSelfTimer(0) } }
-            try await shoot(shooter, clockReliable: false)
+            do {
+                try await shooter.setSelfTimer(seconds)
+                progress?.nextEventAt = ticker.now + .seconds(seconds)
+                try await shoot(shooter, clockReliable: false)
+            } catch {
+                try await Task { try await shooter.setSelfTimer(0) }.value
+                throw error
+            }
+            try await Task { try await shooter.setSelfTimer(0) }.value
 
         case .interval(let every, let count):
+            guard every >= .seconds(1), count == nil || (1...100_000).contains(count!) else {
+                throw SonyError(code: -1, message: "Invalid interval settings")
+            }
             let start = ticker.now
             if let count { progress?.endsAt = start + every * (count - 1) }
             var k = 0
@@ -148,24 +158,37 @@ final class JobRunner {
             let end = ticker.now + duration
             progress?.nextEventAt = end
             progress?.endsAt = end
-            try await shooter.startBulb()
-            do {
+            try await recording(start: { try await shooter.startBulb() }, stop: { try await shooter.stopBulb() }) {
                 try await ticker.sleep(until: end)
-            } catch {
-                // Stopped early: still close the shutter. A fresh Task isn't cancelled.
-                try await Task { try await shooter.stopBulb() }.value
-                progress?.shotsTaken += 1
-                throw error
             }
-            try await shooter.stopBulb()
             progress?.shotsTaken += 1   // postview arrives through getEvent
 
         case .movie:
-            try await shooter.startMovie()
-            while !stopRequested {
-                do { try await ticker.sleep(until: ticker.now + .milliseconds(250)) } catch { break }
+            try await recording(start: { try await shooter.startMovie() }, stop: { try await shooter.stopMovie() }) {
+                while !stopRequested {
+                    try await ticker.sleep(until: ticker.now + .milliseconds(250))
+                }
             }
-            try await Task { try await shooter.stopMovie() }.value
         }
+    }
+
+    /// A lost start response may mean the camera is already recording. Always close that uncertain session.
+    private func recording(start: @Sendable () async throws -> Void,
+                           stop: @escaping @Sendable () async throws -> Void,
+                           body: () async throws -> Void) async throws {
+        do { try await start() }
+        catch let error as SonyError { throw error } // The camera explicitly rejected the start.
+        catch {
+            try await Task { try await stop() }.value
+            throw error
+        }
+        do {
+            try Task.checkCancellation()
+            try await body()
+        } catch {
+            try await Task { try await stop() }.value
+            throw error
+        }
+        try await Task { try await stop() }.value
     }
 }

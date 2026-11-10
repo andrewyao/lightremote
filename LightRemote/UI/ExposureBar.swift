@@ -33,7 +33,7 @@ struct ExposureBar: View {
             .padding(.horizontal, 8)
         }
         .background(.black)
-        .disabled(model.runner.isRunning)
+        .disabled(model.runner.isRunning || camera.isChangingMode)
         .sensoryFeedback(.selection, trigger: drag?.index)
     }
 

@@ -38,7 +38,7 @@ enum JSON: Sendable, Equatable, Codable {
     }
 
     var string: String? { if case .string(let s) = self { return s } else { return nil } }
-    var int: Int? { if case .number(let n) = self { return Int(n) } else { return nil } }
+    var int: Int? { if case .number(let n) = self { return Int(exactly: n) } else { return nil } }
     var bool: Bool? { if case .bool(let b) = self { return b } else { return nil } }
     var array: [JSON]? { if case .array(let a) = self { return a } else { return nil } }
     var strings: [String] { array?.compactMap(\.string) ?? [] }

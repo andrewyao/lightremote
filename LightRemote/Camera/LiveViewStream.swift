@@ -8,6 +8,7 @@ struct LiveViewParser {
     static let commonHeaderSize = 8
     static let payloadHeaderSize = 128
     static let startCode: [UInt8] = [0x24, 0x35, 0x68, 0x79]
+    static let maxFrameSize = 4 * 1024 * 1024
 
     private var buffer = Data()
 
@@ -28,6 +29,7 @@ struct LiveViewParser {
                 continue
             }
             let size = Int(b[12]) << 16 | Int(b[13]) << 8 | Int(b[14])
+            guard size <= Self.maxFrameSize else { buffer.removeAll(); break }
             let padding = Int(b[15])
             let total = headers + size + padding
             guard buffer.count >= total else { break }
@@ -48,12 +50,21 @@ final class LiveViewStream: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     private var continuation: AsyncStream<Data>.Continuation?
     private var task: URLSessionDataTask?
     private let lock = NSLock()
+    private var policy: CameraResourcePolicy?
 
-    func frames(from url: URL) -> AsyncStream<Data> {
+    func frames(from url: URL, policy: CameraResourcePolicy? = nil) -> AsyncStream<Data> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            lock.withLock { self.continuation = continuation }
+            let policy = policy ?? CameraResourcePolicy(baseURL: url)
+            guard policy.allows(url) else { continuation.finish(); return }
+            lock.withLock {
+                self.continuation = continuation
+                self.policy = policy
+                self.parser = LiveViewParser()
+            }
             let config = URLSessionConfiguration.ephemeral
             config.timeoutIntervalForRequest = 10
+            config.httpShouldSetCookies = false
+            config.urlCredentialStorage = nil
             let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
             let task = session.dataTask(with: url)
             lock.withLock { self.task = task }
@@ -66,6 +77,21 @@ final class LiveViewStream: NSObject, URLSessionDataDelegate, @unchecked Sendabl
     }
 
     func cancel() { lock.withLock { task?.cancel() } }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        let allowed = lock.withLock { request.url.map { policy?.allows($0) == true } ?? false }
+        completionHandler(allowed ? request : nil)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        let allowed = lock.withLock {
+            (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } == true
+                && response.url.map { policy?.allows($0) == true } == true
+        }
+        completionHandler(allowed ? .allow : .cancel)
+    }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.withLock {

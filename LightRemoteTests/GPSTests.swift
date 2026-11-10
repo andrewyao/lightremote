@@ -21,20 +21,14 @@ final class GPSTests: XCTestCase {
         XCTAssertNil(DayLog(day: "y").location(at: t0))
     }
 
-    func testStationaryGapIsFilledButRealMovementIsNot() {
+    func testMissingFixesDoNotFabricateAStationaryStay() {
         var log = DayLog(day: "x")
-        log.appendFillingStationaryGap(point(0, 37.0, -122.0))
-        log.appendFillingStationaryGap(point(3600, 37.0005, -122.0))   // an hour later, ~55 m away: sat still
-        // 14 fill points at 4-min spacing + one just before the new fix, all at the old position.
-        XCTAssertEqual(log.points.count, 17)
-        let gaps = zip(log.points, log.points.dropFirst()).map { $1.time.timeIntervalSince($0.time) }
-        XCTAssertLessThanOrEqual(gaps.max() ?? 0, 240)
-        XCTAssertTrue(log.points[1..<16].allSatisfy { $0.latitude == 37.0 })
-        // A photo in the middle of the hour now gets a location instead of falling in a gap.
-        XCTAssertEqual(log.location(at: t0.addingTimeInterval(1800))?.latitude ?? 0, 37.0, accuracy: 1e-9)
-
-        log.appendFillingStationaryGap(point(7200, 37.05, -122.0))     // 5 km away after a gap: travelled
-        XCTAssertEqual(log.points.count, 18, "no fake 'stayed here' point when the phone actually moved")
+        log.append(point(0, 37.0, -122.0))
+        log.append(point(3600, 37.0005, -122.0))
+        XCTAssertEqual(log.points.count, 2)
+        XCTAssertNil(log.location(at: t0.addingTimeInterval(1800)))
+        log.append(point(7200, 37.05, -122.0))
+        XCTAssertEqual(log.points.count, 3)
         XCTAssertEqual(DayLog.meters(point(0, 37, -122), point(0, 37.001, -122)), 111.2, accuracy: 0.5)
     }
 
@@ -47,12 +41,6 @@ final class GPSTests: XCTestCase {
         log.noteUTCOffset(at: iso.date(from: "2026-11-01T08:30:00Z")!, timeZone: la)
         log.noteUTCOffset(at: iso.date(from: "2026-11-01T09:30:00Z")!, timeZone: la)
         XCTAssertEqual(log.utcOffsets.map(\.minutes), [-420, -480])
-    }
-
-    func testClockOffsetUsesMedian() {
-        var log = DayLog(day: "x")
-        log.clockOffsets = [3, 4, 30, 3].map { ClockOffsetEntry(measuredAt: t0, cameraMinusUTCSeconds: $0) }
-        XCTAssertEqual(log.cameraMinusUTC, 4)
     }
 
     func testGPXIsValidXMLWithTrackAndMetadata() throws {
@@ -80,6 +68,40 @@ final class GPSTests: XCTestCase {
         XCTAssertEqual(c.elements["lr:utcOffset"]?.first?["minutes"], "-480")
         XCTAssertEqual(c.elements["lr:shot"]?.count, 1)
         XCTAssertTrue(gpx.contains("<time>2026-10-26T"), "UTC timestamps")
+    }
+
+    func testSharedClockFixturesPreserveMeasurementTimesAndCoverageInGPX() throws {
+        let url = try XCTUnwrap(Bundle(for: GPSTests.self).url(forResource: "clock_matching", withExtension: "json"))
+        let cases = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        let iso = ISO8601DateFormatter()
+        for item in cases {
+            var log = DayLog(day: "2026-11-08")
+            let times = try XCTUnwrap(item["points"] as? [String])
+            log.points = try times.map { text in
+                TrackPoint(time: try XCTUnwrap(iso.date(from: text)), latitude: 37, longitude: -122,
+                           elevation: nil, accuracy: 5)
+            }
+            let clocks = try XCTUnwrap(item["clock"] as? [[Any]])
+            log.clockOffsets = try clocks.map { values in
+                ClockOffsetEntry(measuredAt: try XCTUnwrap(iso.date(from: values[0] as! String)),
+                                 cameraMinusUTCSeconds: values[1] as! Int)
+            }
+            let offsets = try XCTUnwrap(item["offsets"] as? [[Any]])
+            log.utcOffsets = try offsets.map { values in
+                UTCOffsetEntry(from: try XCTUnwrap(iso.date(from: values[0] as! String)),
+                               minutes: values[1] as! Int, zone: "Test")
+            }
+            let gpx = GPX.render(log)
+            XCTAssertTrue(XMLParser(data: Data(gpx.utf8)).parse())
+            for values in clocks {
+                XCTAssertTrue(gpx.contains("measuredAt=\"\(values[0])\" cameraMinusUtcSeconds=\"\(values[1])\""))
+            }
+            for time in times { XCTAssertTrue(gpx.contains("<time>\(time)</time>")) }
+            if let offset = item["expectedOffset"] as? Int {
+                let wall = try XCTUnwrap(iso.date(from: (item["wall"] as! String) + "Z"))
+                XCTAssertNotNil(log.location(at: wall.addingTimeInterval(-Double(offset))))
+            }
+        }
     }
 
     // MARK: JPEG EXIF
